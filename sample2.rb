@@ -19,6 +19,7 @@ def CWE_23_Path_traversal_mitigated
   #
 
   parent = "/path/to/parent_directory"
-  Pathname.new(File.join(parent,"#{params[:name]}.txt"))
+  filename = "#{params[:name]}.txt"
+  Pathname.new(File.join(parent,filename))
 
 end
