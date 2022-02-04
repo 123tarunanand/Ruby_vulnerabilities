@@ -3,5 +3,7 @@ def CWE_23_Path_traversal
   #
   # This function takes in a file name and creates a new path in the parent directory
   #
-  Pathname.new(File.join(params[:parent], params[:name]))
+
+  parent = "/path/to/parent_directory"
+  Pathname.new(File.join(parent, params[:name]))
 end
