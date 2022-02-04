@@ -19,6 +19,6 @@ def CWE_23_Path_traversal_mitigated
   #
 
   parent = "/path/to/parent_directory"
-  params[:name].gsub(/[^0-9a-z]/i, ‘’)
-  Pathname.new(File.join(parent, params[:name]))
+  file_name = params[:name].gsub(/[^0-9a-z]/i, '')
+  Pathname.new(File.join(parent, file_name))
 end
