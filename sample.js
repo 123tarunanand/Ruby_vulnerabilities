@@ -1,5 +1,184 @@
+"use strict";
 
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const qs = require("querystring");
+const {promisify} = require("util");
+const {readFile} = require("fs").promises;
+
+const throttle = require("lodash.throttle");
+const Busboy = require("busboy");
+const {red, blue, green, cyan, magenta} = require("colorette");
+const escRe = require("escape-string-regexp");
+const etag = require("etag");
+const imgSize = require("image-size");
+const rrdir = require("rrdir");
+const sendFile = require("send");
+const ut = require("untildify");
+const Wss = require("ws").Server;
+const yazl = require("yazl");
+
+const cfg = require("./cfg.js");
+const cookies = require("./cookies.js");
+const csrf = require("./csrf.js");
+const db = require("./db.js");
+const filetree = require("./filetree.js");
+const log = require("./log.js");
+const manifest = require("./manifest.js");
+const paths = require("./paths.js").get();
+const pkg = require("../package.json");
+const resources = require("./resources.js");
+const utils = require("./utils.js");
+
+let cache = {};
+const clients = {};
+const clientsPerDir = {};
+let config = null;
+let firstRun = null;
+let ready = false;
+let dieOnError = true;
+
+module.exports = async function droppy(opts, isStandalone, dev, callback) {
+  if (isStandalone) {
+    log.logo(
+      [
+        blue(pkg.name),
+        green(pkg.version),
+        "running on",
+        blue("node"),
+        green(process.version.substring(1))
+      ].join(" "),
+      [
+        blue("config"),
+        "at",
+        green(paths.config)
+      ].join(" "),
+      [
+        blue("files"),
+        "at",
+        green(paths.files)
+      ].join(" ")
+    );
+  }
+  setupProcess(isStandalone);
+
+  try {
+    await promisify((cb) => {
+      utils.mkdir([paths.files, paths.config], cb);
+    })();
+
+    await promisify((cb) => {
+      if (isStandalone) {
+        fs.writeFile(paths.pid, String(process.pid), cb);
+      } else {
+        cb();
+      }
+    })();
+
+    await promisify((cb) => {
+      cfg.init(opts, (err, conf) => {
+        if (!err) {
+          config = conf;
+          if (dev) config.dev = dev;
+        }
+        cb(err);
+      });
+    })();
+
+    await promisify((cb) => {
+      db.load(() => {
+        db.watch(config);
+        cb();
+      });
+    })();
+
+    await promisify((cb) => {
+      log.init({logLevel: config.logLevel, timestamps: config.timestamps});
+      firstRun = Object.keys(db.get("users")).length === 0;
+      // clean up old sessions if no users exist
+      if (firstRun) db.set("sessions", {});
+      log.info("Configuration: ", utils.pretty(config));
+      log.info("Loading resources ...");
+      resources.load(config.dev, (err, c) => {
+        log.info("Loading resources done");
+        cache = c; cb(err);
+      });
+    })();
+
+    await promisify((cb) => {
+      cleanupLinks(cb);
+    })();
+
+    await promisify((cb) => {
+      if (config.dev) debug(); cb();
+    })();
+
+    await promisify((cb) => {
+      if (isStandalone) { startListeners(cb); } else cb();
+    })();
+
+    await promisify((cb) => {
+      log.info("Caching files ...");
+      filetree.init(config);
+      filetree.updateDir(null).then(() => {
+        if (config.watch) filetree.watch();
+        log.info("Caching files done");
+        cb();
+      });
+    })();
+
+    await promisify((cb) => {
+      if (typeof config.keepAlive === "number" && config.keepAlive > 0) {
+        setInterval(() => {
+          Object.keys(clients).forEach(client => {
+            if (!clients[client].ws) return;
+            try {
+              clients[client].ws.ping();
+            } catch {}
+          });
+        }, config.keepAlive);
+      }
+      cb();
+    })();
+  } catch (err) {
+    return callback(err);
+  }
+
+  ready = true;
+  log.info(green("Ready for requests!"));
+  dieOnError = false;
+  callback();
+
+  return {onRequest, setupWebSocket};
+};
+
+function onRequest(req, res) {
+  req.time = Date.now();
+
+  for (const [key, value] of Object.entries(config.headers || {})) {
+    res.setHeader(key, value);
+  }
+
+  if (ready) {
+    if (!utils.isPathSane(req.url, true)) {
+      res.statusCode = 400;
+      res.end();
+      return log.info(req, res, `Invalid GET: ${req.url}`);
+    }
+    if (req.method === "GET" || req.method === "HEAD") {
+      handleGETandHEAD(req, res);
+    } else if (req.method === "POST") {
+      handlePOST(req, res);
+    } else {
+      res.statusCode = 405;
+      res.end();
+    }
+  } else {
+    res.statusCode = 503;
+    res.end("<!DOCTYPE html><html><head><title>droppy - starting up</title></head><body><h2>Just a second! droppy is starting up ...<h2><script>window.setTimeout(function(){window.location.reload()},2000)</script></body></html>");
+  }
+}
 
 async function startListeners(callback) {
   if (!Array.isArray(config.listeners)) {
@@ -1184,6 +1363,19 @@ function cleanupLinks(callback) {
   }
 }
 
+// verify a resource etag, returns the etag if it doesn't match, otherwise
+// returns null indicating the response is handled with a 304
+function checkETag(req, res, path, mtime) {
+  const eTag = etag(`${path}/${mtime}`);
+  if ((req.headers["if-none-match"] || "") === eTag) {
+    res.statusCode = 304;
+    res.end();
+    log.info(req, res);
+    return null;
+  }
+  return eTag;
+}
+
 // Create a zip file from a directory and stream it to a client
 function streamArchive(req, res, zipPath, download, stats, shareLink) {
   const eTag = checkETag(req, res, zipPath, stats.mtime);
@@ -1226,6 +1418,106 @@ function streamArchive(req, res, zipPath, download, stats, shareLink) {
     res.statusCode = 500;
     res.end();
   });
+}
+
+function streamFile(req, res, filepath, download, stats, shareLink) {
+  const eTag = checkETag(req, res, filepath, stats.mtime);
+  if (!eTag) return;
+
+  function setHeaders(res) {
+    res.setHeader("Content-Type", utils.contentType(filepath));
+    res.setHeader("Cache-Control", `${shareLink ? "public" : "private"}, max-age=0`);
+    res.setHeader("Content-Disposition", utils.getDispo(filepath, download));
+    res.setHeader("ETag", eTag);
+  }
+
+  if (req.method === "HEAD") {
+    setHeaders(res);
+    res.end();
+    return;
+  }
+
+  // send expects a url-encoded argument
+  sendFile(req, encodeURIComponent(utils.removeFilesPath(filepath).substring(1)), {
+    root: paths.files,
+    dotfiles: "allow",
+    index: false,
+    etag: false,
+    cacheControl: false,
+  }).on("headers", res => {
+    setHeaders(res);
+  }).on("error", err => {
+    log.error(err);
+    if (err.status === 416) {
+      log.error("requested range:", req.headers.range);
+      log.error("file size:", stats.size);
+    }
+    res.statusCode = typeof err.status === "number" ? err.status : 400;
+    res.end();
+  }).on("stream", () => {
+    log.info(req, res);
+  }).pipe(res);
+}
+
+function validateRequest(req) {
+  return Boolean(cookies.get(req.headers.cookie) || config.public);
+}
+
+const cbs = [];
+function tlsInit(opts, cb) {
+  if (!cbs[opts.index]) {
+    cbs[opts.index] = [cb];
+    tlsSetup(opts, (err, tlsData) => {
+      cbs[opts.index].forEach(cb => {
+        cb(err, tlsData);
+      });
+    });
+  } else cbs[opts.index].push(cb);
+}
+
+async function tlsSetup(opts, cb) {
+  if (typeof opts.key !== "string") {
+    return cb(new Error("Missing TLS option 'key'"));
+  }
+  if (typeof opts.cert !== "string") {
+    return cb(new Error("Missing TLS option 'cert'"));
+  }
+
+  const cert = await readFile(path.resolve(paths.config, ut(opts.cert)), "utf8");
+  const key = await readFile(path.resolve(paths.config, ut(opts.key)), "utf8");
+
+  cb(null, {cert, key});
+}
+
+function cleanupSessions() {
+  if (!ready) return;
+  // Clean inactive sessions after 1 month of inactivity
+  const sessions = db.get("sessions");
+  Object.keys(sessions).forEach(session => {
+    if (!sessions[session].lastSeen || (Date.now() - sessions[session].lastSeen >= 2678400000)) {
+      delete sessions[session];
+    }
+  });
+  db.set("sessions", sessions);
+}
+
+setTimeout(() => setInterval(cleanupSessions, 3600 * 1000), 60 * 1000);
+
+// Process startup
+function setupProcess(standalone) {
+  if (standalone) {
+    process.on("SIGINT", endProcess.bind(null, "SIGINT"));
+    process.on("SIGQUIT", endProcess.bind(null, "SIGQUIT"));
+    process.on("SIGTERM", endProcess.bind(null, "SIGTERM"));
+    process.on("unhandledRejection", error => {
+      log.error(error);
+      if (dieOnError) process.exit(1);
+    });
+    process.on("uncaughtException", error => {
+      log.error(error);
+      if (dieOnError) process.exit(1);
+    });
+  }
 }
 
 // Process shutdown
