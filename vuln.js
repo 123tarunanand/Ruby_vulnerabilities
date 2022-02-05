@@ -13,9 +13,6 @@ http.createServer(function(req, res) {
 http.createServer(function(req, res) {
   // Http server that listens to port 8080 and creates a file in the parent directory based on the name parameter
   var parent = parent = "/path/to/parent_directory";
-  var filename = path.join(parent,req.params['name']);
-  if (filename.indexOf(parent) == 0)
-  {
-    var writeStream = fs.createWriteStream(filename);
-  }
+  var filename = path.normalize(req.params['name']).replace(/^(\.\.(\/|\\|$))+/, '');
+  var writeStream = fs.createWriteStream(path.join(parent,filename));
 }).listen(8080);
