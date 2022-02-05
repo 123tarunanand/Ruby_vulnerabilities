@@ -1,6 +1,8 @@
-function CWE_23_Path_traversal () {
-
-  var filename = $.url().param('name');
-  var parent = "/path/to/parent_directory";
-  path.join(parent,filename) ;
+app.get('/', (req, res) => {
+  const fileName = req.body.fileName;
+  // some code...
+  fs.stat(`./nonAccessibleDir/${fileName}`, async function(err, stat) {
+    // some code...
+  });
+  // some code...
 }
