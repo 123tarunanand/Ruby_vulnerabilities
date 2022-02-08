@@ -15,15 +15,34 @@ public class Main {
     }
     catch(IOException e)
     {
-      return -1;
+      return ;
     }
   }
 
+
+  static void CWE_78_OS_injection(){
+    try
+    {
+      Scanner myObj = new Scanner(System.in);
+      String cmd = myObj.nextLine();
+    Process process = Runtime.getRuntime().exec(cmd);
+    BufferedReader stdInput = new BufferedReader(new InputStreamReader(process.getInputStream()));
+
+    String s = null;
+    while ((s = stdInput.readLine()) != null) {
+      System.out.println(s);
+    }
+    }
+     catch (IOException e) {
+       return;
+     }
+  }
 
   public static void main(String[] args)
   {
     Scanner myObj = new Scanner(System.in);
     String name = myObj.nextLine();
     CWE_23_Path_traversal(name);
+    CWE_78_OS_injection();
   }
 }
