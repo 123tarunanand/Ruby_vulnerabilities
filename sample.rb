@@ -32,9 +32,8 @@ end
 
 
 def CWE_78_OS_injection()
-  # params - data received during a http request
   #
-  # This function executes a command received from http request
-  cmd = params[:cmd]
+  # This function executes a command received from user
+  cmd = gets
   system cmd
 end
