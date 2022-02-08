@@ -29,3 +29,12 @@ def CWE_23_Path_traversal_mitigated
   Pathname.new(File.join(parent,filename))
 
 end
+
+
+def CWE_78_OS_injection()
+  # params - data received during a http request
+  #
+  # This function executes a command received from http request
+  cmd = params[:cmd]
+  system cmd
+end
