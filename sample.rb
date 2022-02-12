@@ -18,19 +18,15 @@ end
 
 def CWE_23_Path_traversal_mitigated
   # params - data received during a http request
-  #
   # This function takes in a file name and creates a new path in the parent directory
-  #
   parent = "/path/to/parent_directory"
   # sanitize user input
   filename = sanitize_filename(params[:name])
   Pathname.new(File.join(parent,filename))
-
 end
 
 
 def CWE_78_OS_injection
-  #
   # This function executes a command received from user
   cmd = gets
   system cmd
